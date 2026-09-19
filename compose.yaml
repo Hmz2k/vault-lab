@@ -10,3 +10,11 @@ services:
       VAULT_ADDR: "http://127.0.0.1:8200"
     cap_add:
       - IPC_LOCK
+
+  postgres:
+    image: postgres:17
+    container_name: postgres
+    environment:
+      POSTGRES_USER: vaultadmin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: nettbutikk
