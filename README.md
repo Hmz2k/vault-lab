@@ -157,7 +157,7 @@ Dette er et laboratorium, ikke et produksjonsoppsett. Bevisste forenklinger:
 Krever Docker med Compose.
 
 ```bash
-git clone <repo>
+git clone https://github.com/Hmz2k/vault-lab.git
 cd vault-lab
 
 # Adminpassord til databasen, skrives skjult
