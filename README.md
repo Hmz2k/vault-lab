@@ -1,187 +1,158 @@
-# Vault Lab: sikker håndtering av hemmeligheter
+# Vault Lab
 
-Et praktisk prosjekt der jeg setter opp HashiCorp Vault og PostgreSQL i Docker, finner og utbedrer måter hemmeligheter lekker på, begrenser tilgang med policyer og lar Vault lage databasepassord som slettes automatisk.
+I dette prosjektet satte jeg opp HashiCorp Vault og en PostgreSQL database i Docker. Jeg lagret passord i Vault, fant to måter de likevel kunne lekke på, og fikset dem. Til slutt lot jeg Vault lage databasepassord som slettes av seg selv.
 
-> Alle passord, nøkler og brukernavn i prosjektet er falske og laget kun for denne labben.
+Alle passord i prosjektet er falske.
 
-## Problemet
+## Hvorfor
 
-Lekkede passord er en av de vanligste årsakene til sikkerhetsbrudd. Passord ligger i kode og konfigurasjonsfiler, deles mellom mange, byttes sjelden og ingen vet hvem som har brukt dem. Målet med prosjektet var å forstå hvordan et verktøy for håndtering av hemmeligheter løser dette i praksis, og hvor svakhetene ligger.
+Lekkede passord er en av de vanligste årsakene til innbrudd. Passord ligger ofte i kode og filer, mange deler det samme passordet, og ingen vet hvem som har brukt det. Jeg ville se hvordan Vault løser dette, og hvor det fortsatt kan gå galt.
 
 ## Oppsett
 
-```mermaid
-flowchart LR
-    U[Meg i terminalen] ==> V[Vault<br/>127.0.0.1:8200]
-    A[App med begrenset token] ==> V
-    V ==> P[(PostgreSQL<br/>kun internt nettverk)]
-    V ==> L[Revisjonslogg]
-```
+* Vault 1.20 i Docker, bare tilgjengelig fra min egen maskin
+* PostgreSQL 17, bare tilgjengelig inne i Docker
+* Tilgangsreglene ligger i mappen `policies/`
+* Kjørt på Windows 11 med WSL, Ubuntu og Docker
 
-* **Vault 1.20** i Docker, kun tilgjengelig fra min egen maskin
-* **PostgreSQL 17** uten eksponerte porter, kun tilgjengelig fra Docker nettverket
-* **Policyer** lagret som kode i `policies/`
-* Testet på Windows 11 med WSL 2, Ubuntu og Docker 29
+## 1. Vault i utviklermodus
 
-## Resultater
+![Vault status](docs/bilder/01_devmodus_status.png)
 
-### 1. Utgangspunkt: Vault i utviklermodus
+Jeg startet Vault i utviklermodus for å lære det grunnleggende. Tre ting skiller seg ut:
 
-![Vault status i utviklermodus](docs/bilder/01_devmodus_status.png)
+* **Sealed false:** Vault er åpen med en gang. I et ekte oppsett starter den låst.
+* **Threshold 1:** én nøkkel er nok til å åpne Vault. I et ekte oppsett trengs flere personer.
+* **Storage Type inmem:** alt ligger i minnet og forsvinner når Vault stopper.
 
-Jeg startet Vault 1.20 i utviklermodus med Docker Compose for å lære det grunnleggende. Statusen viser tre ting jeg merket meg:
+Utviklermodus skriver også hovednøkkelen og root tokenet rett i loggen. Logger kan altså lekke passord, så de må sjekkes før man deler dem.
 
-* **Sealed false:** Vault starter ulåst. I et produksjonsoppsett starter den alltid forseglet og må låses opp med nøkler.
-* **Threshold 1:** én enkelt nøkkel er nok til å låse opp. I produksjon deles nøkkelen slik at ingen person kan åpne Vault alene.
-* **Storage Type inmem:** alt lagres i minnet og forsvinner når containeren stopper.
+## 2. Ingen tilgang uten token
 
-Jeg la også merke til at utviklermodus skriver unseal key og root token i klartekst i loggen. Det viste meg at logger også kan lekke hemmeligheter, og derfor sjekker jeg alltid logger før jeg deler dem.
+![Nektet uten token](docs/bilder/02_uten_token_nektet.png)
 
-### 2. Ingen tilgang uten token
+Første gang jeg prøvde å lagre et passord, fikk jeg 403. Jeg var ikke logget inn, så Vault nektet alt. Vault stenger alt til noen har fått lov.
 
-![Vault nekter forespørsel uten token](docs/bilder/02_uten_token_nektet.png)
+Jeg logget inn med `vault login`. Da skrives tokenet skjult, så det ikke havner i kommandohistorikken.
 
-Mitt første forsøk på å lagre en hemmelighet ble avvist med 403 Forbidden. Kommandoen ble sendt uten token, så Vault visste ikke hvem jeg var. Feilen kom allerede før noe ble lagret: kommandoen spør først Vault hva slags lager som finnes på stien, og selv det ble nektet. Vault stenger alt som standard til noen eksplisitt har fått tilgang.
+## 3. Root token
 
-Jeg løste det ved å logge inn med `vault login`. Da skrives tokenet skjult, i stedet for rett i kommandoen, slik at det ikke havner i kommandohistorikken min.
+![Root token](docs/bilder/03_root_token.png)
 
-### 3. Innlogging med root token
+Root tokenet har full tilgang og utløper aldri. Det er det farligste en angriper kan stjele. Det bør bare brukes til å sette opp Vault. Senere i prosjektet lager jeg tokens med mindre tilgang og kort levetid.
 
-![Root token etter innlogging](docs/bilder/03_root_token.png)
+Jeg har skjult `token_accessor` på bildet, siden den kan brukes til å slå opp tokenet.
 
-Etter innlogging viser Vault hvilke rettigheter tokenet har. Policyen er **root**, som betyr full tilgang til alt, og **token_duration** er uendelig, så tokenet utløper aldri. Et token som kan alt og varer evig er det mest verdifulle en angriper kan stjele. I et produksjonsoppsett skal root token kun brukes til første oppsett og deretter tilbakekalles. Videre i prosjektet lager jeg egne tokens med begrensede rettigheter og kort levetid.
+## 4. Lagre og hente et passord
 
-Jeg har sladdet token_accessor. Den gir ikke tilgang i seg selv, men kan brukes til å slå opp og tilbakekalle tokenet, og slike verdier deler jeg ikke offentlig.
+![Passord lagret og hentet](docs/bilder/04_hemmelighet_lagret.png)
 
-### 4. Lagre og hente en hemmelighet
+Jeg lagret et databasepassord for en tenkt nettbutikk og hentet det ut igjen. Vault la til `data/` i stien selv. Det må man huske når man skriver tilgangsregler.
 
-![Hemmelighet lagret og hentet](docs/bilder/04_hemmelighet_lagret.png)
+## 5. Det gamle passordet fantes fortsatt
 
-Jeg lagret et databasepassord for en tenkt nettbutikk med `kv put`, og hentet det ut igjen med `kv get`. Vault svarte med stien `secret/data/nettbutikk/database`, selv om jeg skrev `secret/nettbutikk/database`. Grunnen er at lageret er KV versjon 2, som skiller mellom selve dataene under `data/` og informasjon om dem under `metadata/`. Det måtte jeg ta hensyn til senere da jeg skrev tilgangspolicyer.
+![Gammelt passord](docs/bilder/05_gammelt_passord_hentes.png)
 
-En app trenger bare selve verdien, så jeg hentet også passordet alene med `kv get -field=passord`.
+Jeg byttet passordet fra `Sommer2026` til `Host2026`. Likevel kunne jeg hente det gamle passordet. Vault tar vare på opptil ti gamle versjoner.
 
-### 5. Gamle versjoner kan fortsatt hentes
+Det er nyttig hvis man må gå tilbake. Men hvis passordet ble byttet fordi det lekket, ligger det lekkede passordet der fortsatt.
 
-![Gammelt passord kan fortsatt hentes](docs/bilder/05_gammelt_passord_hentes.png)
+## 6. Passordene lå i kommandohistorikken
 
-Jeg oppdaterte databasepassordet fra `Sommer2026` til `Host2026`. Vault overskrev ikke den eksisterende verdien, men lagret endringen som versjon 2. Da jeg deretter hentet versjon 1, fikk jeg fortsatt ut det opprinnelige passordet i klartekst.
+![Passord i historikken](docs/bilder/06_passord_i_historikk.png)
 
-KV versjon 2 beholder som standard opptil ti tidligere versjoner av hver hemmelighet. Det er nyttig dersom et passordbytte må rulles tilbake, men dersom et passord byttes fordi det er kompromittert, vil det kompromitterte passordet fortsatt være tilgjengelig for alle med lesetilgang til stien. Et passordbytte er ikke fullført før den gamle versjonen er fjernet.
+Jeg hadde skrevet passordene rett i kommandoene. Terminalen lagrer alle kommandoer, så passordene lå i klartekst i historikken. Kommandoen `clear` hjelper ikke, den tømmer bare skjermen.
 
-### 6. Passord eksponert i kommandohistorikken
+Vault beskytter passordet når det først er lagret, men ikke på veien inn.
 
-![Passord i kommandohistorikken](docs/bilder/06_passord_i_historikk.png)
+## 7. Fikset
 
-Da jeg gjennomgikk kommandohistorikken, fant jeg begge passordene i klartekst. Jeg hadde skrevet dem direkte i kommandoen, og Bash lagrer alle kommandoer i `~/.bash_history`. Enhver med tilgang til brukerkontoen min kunne dermed lest passordene uten å være i nærheten av Vault. Jeg observerte også at `clear` kun tømmer skjermen og ikke påvirker historikken.
+![Fikset](docs/bilder/07_utbedring_verifisert.png)
 
-Funnet viser at sikkerhet må vurderes for hele kjeden. Vault beskytter hemmeligheter fra det øyeblikket de er lagret, men kan ikke beskytte dem på veien inn.
+Jeg slettet det gamle passordet for godt med `kv destroy`, og satte Vault til å bare ta vare på to versjoner. Da jeg lagret et nytt passord, forsvant den gamle versjonen helt.
 
-### 7. Utbedring verifisert
+Jeg fant tre passord i historikken, ikke to. Det tredje kom fra en kommando som feilet. Feilede kommandoer lagres også. Jeg slettet alle tre, og bruker nå `read -s`, som skjuler det jeg skriver.
 
-![Utbedring verifisert](docs/bilder/07_utbedring_verifisert.png)
+## 8. Appen får bare det den trenger
 
-Jeg slettet den kompromitterte versjonen permanent med `kv destroy`. Til forskjell fra `kv delete`, som kun skjuler en versjon og kan reverseres, fjerner `destroy` selve dataene. Jeg begrenset også antall lagrede versjoner til to, og da jeg senere lagret en ny versjon, fjernet Vault versjon 1 helt.
+![Appen leser sitt eget passord](docs/bilder/08_policy_tillater.png)
 
-Et søk i kommandohistorikken avdekket tre forekomster av passord, ikke to som jeg først antok. Den tredje stammet fra forsøket som feilet med 403. Kommandoer lagres uavhengig av om de lykkes, så et systematisk søk er nødvendig. Etter oppryddingen gjenstår kun én lagringskommando, og den bruker variabelen `$PASSORD`. Jeg leser nå passord inn med `read -s`, som skjuler inndata, slik at selve verdien aldri skrives til historikken.
-
-### 8. Tilgang styrt av policy
-
-![Appen leser sin egen hemmelighet](docs/bilder/08_policy_tillater.png)
-
-Jeg skrev en policy for nettbutikken som kun gir lesetilgang til `secret/data/nettbutikk/*`, og lastet den inn fra filen [`policies/nettbutikk.hcl`](policies/nettbutikk.hcl). Policyen ligger versjonskontrollert i repoet, slik at endringer i tilgang kan spores. Deretter opprettet jeg et token knyttet til policyen med en levetid på 15 minutter.
-
-Med appens token kunne jeg lese databasepassordet. Tokenet ble lagret i en variabel og sendt inn med `VAULT_TOKEN`, slik at verdien aldri ble vist eller lagret i historikken. Til forskjell fra root tokenet kan dette tokenet kun lese én sti og slutter å virke etter kort tid.
+Jeg skrev en tilgangsregel som bare lar nettbutikken lese sitt eget passord. Så lagde jeg et token med denne regelen som varer i 15 minutter. Med det tokenet kunne appen lese passordet sitt.
 
 ![Appen blir nektet](docs/bilder/09_policy_nekter.png)
 
-Deretter testet jeg to handlinger appen ikke skal ha tilgang til. Forsøket på å lese betalingsnøkkelen under `secret/betaling/api` ble avvist, fordi stien ikke er nevnt i policyen. Forsøket på å overskrive nettbutikkens eget passord ble også avvist, selv om appen har tilgang til stien, fordi policyen kun gir lesetilgang.
+Appen fikk ikke lese betalingsnøkkelen, og den fikk ikke endre sitt eget passord. Hvis appen blir hacket, får angriperen bare det appen allerede har.
 
-Policyen avgrenser dermed både hvilke hemmeligheter appen kan nå, og hva den kan gjøre med dem. Dersom appen blir kompromittert, kan en angriper verken hente andre systemers hemmeligheter eller endre passordet for å låse ute legitime brukere.
-
-### 9. Tokenet utløper av seg selv
+## 9. Tokenet slutter å virke
 
 ![Tokenet er utløpt](docs/bilder/10_token_utlopt.png)
 
-Jeg opprettet et token med samme policy og en levetid på 30 sekunder. Klokken 14:52:45 kunne tokenet lese databasepassordet. Etter 35 sekunder ble samme forespørsel avvist med `invalid token`.
+Jeg lagde et token som varer i 30 sekunder. Klokka 14:52:45 virket det. Etter 35 sekunder fikk jeg `invalid token`. Et stjålet token med kort levetid er fort verdiløst.
 
-Feilmeldingen skiller seg fra policytesten. Der var tokenet gyldig, men manglet tilgang. Her har Vault fjernet tokenet helt. Et stjålet token med kort levetid gir en angriper et svært begrenset tidsvindu.
+## 10. Logg over hvem som hentet hva
 
-### 10. Revisjonslogg
+![Loggen](docs/bilder/11_revisjonslogg.png)
 
-![Revisjonslogg](docs/bilder/11_revisjonslogg.png)
+Jeg slo på loggen i Vault. Den viste begge forsøkene fra appen: ett som ble godtatt og ett som ble nektet, med tidspunkt og hvilken tilgang tokenet hadde.
 
-Jeg aktiverte revisjonsloggen og gjentok de to forsøkene med appens token. Loggen registrerte begge forespørslene med tidspunkt, sti, operasjon og hvilke policyer tokenet hadde. Det tillatte forsøket har ingen feil, mens forsøket på å lese betalingsnøkkelen er registrert med `permission denied`. I en reell hendelse er det slik man sporer hva en kompromittert applikasjon har forsøkt å hente.
+Jeg søkte etter passordet i loggen og fant det ikke. Vault skriver ikke selve passordene i loggen.
 
-Et søk etter passordet i loggfilen ga null treff. Vault erstatter sensitive verdier med en HMAC før de skrives. Loggen dokumenterer at en hemmelighet ble hentet, uten selv å bli et nytt sted der hemmeligheten kan lekke.
+## 11. Databasepassord som slettes av seg selv
 
-### 11. Dynamiske databasepassord
+![Innlogging med passord fra Vault](docs/bilder/12_dynamisk_passord.png)
 
-![Innlogging med dynamisk passord](docs/bilder/12_dynamisk_passord.png)
+I stedet for ett fast databasepassord lot jeg Vault lage en ny databasebruker hver gang noen trenger det. Brukeren kan bare lese, og varer i to minutter. Jeg lot også Vault bytte adminpassordet til databasen, så det bare er Vault som vet det.
 
-I stedet for ett fast databasepassord som deles av alle, koblet jeg Vault til PostgreSQL og lot Vault opprette databasebrukere ved behov. Hver bruker får kun lesetilgang og en levetid på to minutter. Etter oppsettet lot jeg Vault bytte databasens administratorpassord, slik at kun Vault kjenner det. Ingen person har lenger administratortilgang til databasen.
+![Passordet virker ikke lenger](docs/bilder/13_passord_utlopt.png)
 
-Jeg ba Vault om en bruker og logget inn fra en separat container på samme nettverk, slik en applikasjon ville gjort. Brukernavnet ble generert av Vault i samme øyeblikk, og passordet ble aldri vist på skjermen.
+Etter to minutter virket ikke brukeren lenger. Et lekket passord blir ubrukelig av seg selv, uten at noen må oppdage lekkasjen først.
 
-![Passordet har utløpt](docs/bilder/13_passord_utlopt.png)
+## Det jeg lærte
 
-Etter at levetiden var passert, ble samme brukernavn og passord avvist. Et lekket passord er dermed verdiløst etter kort tid, uten at noen trenger å oppdage lekkasjen eller bytte passordet manuelt. PostgreSQL returnerer samme feilmelding uavhengig av om brukeren finnes, slik at feilmeldingen ikke kan brukes til å kartlegge gyldige brukernavn.
-
-## Hva jeg lærte
-
-* **Verktøyet er bare én del av kjeden.** Vault beskyttet hemmelighetene godt, men de lekket likevel via kommandohistorikken før de kom inn. Den største risikoen lå i hvordan jeg brukte verktøyet.
-* **Å bytte et passord er ikke det samme som å fjerne det gamle.** Versjonering er nyttig, men krever bevisst opprydding.
-* **Feilede kommandoer lagres også.** Jeg fant et passord i historikken jeg ikke husket å ha skrevet, fordi kommandoen hadde feilet. Jeg søker nå systematisk i stedet for å stole på hukommelsen.
-* **Kort levetid begrenser skaden.** Tokens og databasepassord som utløper av seg selv gjør at en lekkasje ikke trenger å bli oppdaget for å bli uskadeliggjort.
-* **Feilmeldinger forteller mye.** Forskjellen på `permission denied` og `invalid token` viste om problemet var manglende tilgang eller et token som ikke lenger finnes.
-* **Små feil underveis:** jeg skrev `wsl -install` med én bindestrek, glemte `apt update`, fikk `permission denied` mot `docker.sock` fordi brukeren ikke var i docker gruppen, og opplevde at `read -s` tok imot neste innlimte linje som passord. Alle ble løst, og alle lærte meg noe om hvordan verktøyene fungerer.
+* Vault beskyttet passordene godt, men de lekket likevel via terminalen. Det største problemet var hvordan jeg brukte verktøyet.
+* Å bytte et passord fjerner ikke det gamle.
+* Kommandoer som feiler blir også lagret i historikken.
+* Tokens og passord som utløper av seg selv gjør en lekkasje mye mindre farlig.
+* Feilmeldingene sier mye. `permission denied` betyr manglende tilgang, `invalid token` betyr at tokenet ikke finnes lenger.
 
 ## Begrensninger
 
-Dette er et laboratorium, ikke et produksjonsoppsett. Bevisste forenklinger:
+Dette er en lab, ikke et ekte oppsett:
 
-* Vault kjører i utviklermodus med lagring i minnet, ulåst oppstart og én nøkkel
-* Trafikken er ikke kryptert med TLS, verken mot Vault eller mot databasen (`sslmode=disable`)
-* Root token er satt til en kjent verdi i `compose.yaml`
-* Verdier sendt som argument til `docker exec` er kortvarig synlige i prosesslisten
+* Vault kjører i utviklermodus
+* Trafikken er ikke kryptert
+* Root tokenet er satt til en kjent verdi
 
-## Videre arbeid
+## Videre
 
-* Produksjonslikt oppsett med varig lagring, forseglet oppstart og nøkkel delt i fem der tre må til
-* Tilbakekalle root token etter oppsett og bruke AppRole for applikasjoner
-* TLS mellom alle komponenter
-* Overvåke revisjonsloggen med en SIEM og varsle ved gjentatte nektede forsøk
+* Kjøre Vault som i et ekte oppsett, låst ved oppstart og med flere nøkler
+* Slette root tokenet etter oppsett
+* Kryptere trafikken
+* Varsle når noen blir nektet mange ganger
 
 ## Kjør selv
 
-Krever Docker med Compose.
+Du trenger Docker med Compose.
 
 ```bash
 git clone https://github.com/Hmz2k/vault-lab.git
 cd vault-lab
 
-# Adminpassord til databasen, skrives skjult
 read -s -p "Database adminpassord: " PG
 echo "POSTGRES_PASSWORD=$PG" > .env
 unset PG
 chmod 600 .env
 
 docker compose up -d
-docker exec -it vault vault login        # token: root
-
-# Policy
+docker exec -it vault vault login
 docker exec -i vault vault policy write nettbutikk - < policies/nettbutikk.hcl
-
-# Revisjonslogg
 docker exec vault vault audit enable file file_path=/tmp/vault_audit.log
 ```
 
-Oppsettet av databasemotoren og testene er beskrevet steg for steg i [ARBEIDSLOGG.md](ARBEIDSLOGG.md).
+Resten av stegene står i [ARBEIDSLOGG.md](ARBEIDSLOGG.md).
 
-## Opprydding
+## Rydde opp
 
 ```bash
 docker compose down
 ```
-
-Siden Vault kjører i utviklermodus og databasen ikke har varig lagring, forsvinner alle data når containerne fjernes.
